@@ -1,13 +1,16 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
+
+import { LoginForm } from "@/components/auth/login-form";
 
 export const metadata: Metadata = { title: "Login" };
 
 export default function LoginPage() {
   return (
     <div className="w-full max-w-sm">
-      <p className="text-muted-foreground text-center">
-        Login form — coming soon.
-      </p>
+      <Suspense>
+        <LoginForm />
+      </Suspense>
     </div>
   );
 }

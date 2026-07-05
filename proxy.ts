@@ -1,9 +1,8 @@
-import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { updateSession } from "@/lib/supabase/middleware";
 
-// Auth guard — full Supabase session check added in Feature #3
-export function proxy(_request: NextRequest) {
-  return NextResponse.next();
+export function proxy(request: NextRequest) {
+  return updateSession(request);
 }
 
 export const config = {

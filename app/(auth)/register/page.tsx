@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 
+import { RegisterForm } from "@/components/auth/register-form";
+
 export const metadata: Metadata = { title: "Create Account" };
 
 export default function RegisterPage() {
   return (
     <div className="w-full max-w-sm">
-      <p className="text-muted-foreground text-center">
-        Register form — coming soon.
-      </p>
+      <RegisterForm />
     </div>
   );
 }
