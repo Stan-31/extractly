@@ -20,7 +20,7 @@ auth/DB/storage, Prisma as the ORM, Stripe planned for subscriptions
 - [x] **Feature 5: OCR + extraction** — `lib/invoice-processing.ts` (`processUpload`) runs synchronously right after upload: `lib/ocr/index.ts` calls Mistral OCR (`mistral.ocr.process`, PDF via `document_url`/image via `image_url`, joins `pages[].markdown`), then `lib/extraction/index.ts` (`extractInvoiceData`) feeds that text to Claude (`claude-opus-4-8` via `messages.parse` + `zodOutputFormat(invoiceExtractionSchema)` from `schemas/index.ts`) to get structured fields. `Upload.status` moves `PENDING` → `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` set on failure), and the result is upserted into `Invoice` keyed on `uploadId`. `app/api/upload/route.ts` triggers this inline on upload; `app/api/extract/route.ts` is a manual retry endpoint for an existing `Upload` (re-downloads from storage). Verified via `tsc --noEmit` against the real Mistral/Anthropic SDK types. One real attempt was made (`test-invoice.pdf`) and it reached the Claude API call but failed with `"Your credit balance is too low to access the Anthropic API"` — the Anthropic account backing this project has no credits, so the pipeline itself is still unverified end-to-end. See Still Owed.
 - [x] **Feature 6: Excel export + invoices list UI** — `app/api/export/route.ts` streams an `.xlsx` (via `lib/excel.ts`'s `buildInvoiceWorkbook`, `exceljs`) for a given `invoiceId`, scoped to the signed-in user. `lib/invoice-serializer.ts` (`serializeInvoice`) converts a Prisma `Invoice` (+ its `upload.fileName`) into the `InvoiceDetail` shape from `types/index.ts` (Decimal → number, Date → ISO string). `app/dashboard/invoices/page.tsx` lists all of the user's `Invoice` rows; `app/dashboard/invoices/[id]/page.tsx` is the detail view with an export link/button. `app/api/invoices/route.ts` and `app/api/invoices/[id]/route.ts` back these with real Prisma queries (no longer 501 stubs). Tested manually: since the Anthropic account has no credits, a fake `Upload`+`Invoice` pair was inserted directly into the DB (via a temporary dev-only API route, deleted after use — not via real OCR/extraction) to exercise the list/detail/export UI. User confirmed it all works.
 
-Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5).
+Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5), `75d059d` (Feature 6).
 
 ## Workflow (read this before touching anything)
 
@@ -106,6 +106,6 @@ For manual testing without burning more real signups:
 
 ## Current Git Commit
 
-- **Hash:** `9539a47`
+- **Hash:** `75d059d`
 - **Branch:** `main`
 - **Repo:** https://github.com/Stan-31/extractly
