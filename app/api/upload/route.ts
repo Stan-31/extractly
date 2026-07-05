@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
+import { processUpload } from "@/lib/invoice-processing";
 import { uploadFileSchema } from "@/schemas";
 
 export async function POST(request: Request) {
@@ -57,5 +58,20 @@ export async function POST(request: Request) {
     },
   });
 
-  return NextResponse.json({ upload }, { status: 201 });
+  // Synchronous for now — no queue infra exists yet. Revisit if OCR +
+  // extraction latency makes this endpoint too slow.
+  const fileBuffer = Buffer.from(await file.arrayBuffer());
+  await processUpload({
+    uploadId: upload.id,
+    userId: user.id,
+    fileBuffer,
+    mimeType: file.type,
+    fileName: file.name,
+  });
+
+  const finalUpload = await prisma.upload.findUniqueOrThrow({
+    where: { id: upload.id },
+  });
+
+  return NextResponse.json({ upload: finalUpload }, { status: 201 });
 }

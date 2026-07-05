@@ -24,3 +24,42 @@ export const uploadFileSchema = z.object({
 });
 
 export type UploadFileInput = z.infer<typeof uploadFileSchema>;
+
+export const extractRequestSchema = z.object({
+  uploadId: z.string().uuid(),
+});
+
+export type ExtractRequestInput = z.infer<typeof extractRequestSchema>;
+
+// Structured shape Claude extracts from OCR text — mirrors the Invoice model's
+// extractable fields. Dates come back as ISO date strings (not Date objects)
+// since structured-output JSON has no native date type.
+export const invoiceLineItemSchema = z.object({
+  description: z.string().nullable(),
+  quantity: z.number().nullable(),
+  unitPrice: z.number().nullable(),
+  amount: z.number().nullable(),
+});
+
+export const invoiceExtractionSchema = z.object({
+  vendorName: z.string().nullable(),
+  invoiceNumber: z.string().nullable(),
+  invoiceDate: z
+    .string()
+    .nullable()
+    .describe("ISO 8601 date (YYYY-MM-DD), or null if not present"),
+  dueDate: z
+    .string()
+    .nullable()
+    .describe("ISO 8601 date (YYYY-MM-DD), or null if not present"),
+  currency: z
+    .string()
+    .nullable()
+    .describe("ISO 4217 currency code, e.g. USD, EUR"),
+  subtotal: z.number().nullable(),
+  taxAmount: z.number().nullable(),
+  totalAmount: z.number().nullable(),
+  lineItems: z.array(invoiceLineItemSchema),
+});
+
+export type InvoiceExtraction = z.infer<typeof invoiceExtractionSchema>;
