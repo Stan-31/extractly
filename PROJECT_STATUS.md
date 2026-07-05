@@ -165,6 +165,6 @@ For manual testing without burning more real signups:
 
 ## Current Git Commit
 
-- **Hash:** `1306d75`
+- **Hash:** `12d8c51`
 - **Branch:** `main`
 - **Repo:** https://github.com/Stan-31/extractly
