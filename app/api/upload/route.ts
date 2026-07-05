@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
 import { processUpload } from "@/lib/invoice-processing";
+import { checkUploadAllowance } from "@/lib/subscription";
 import { uploadFileSchema } from "@/schemas";
 
 export async function POST(request: Request) {
@@ -13,6 +14,16 @@ export async function POST(request: Request) {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const allowance = await checkUploadAllowance(user.id);
+  if (!allowance.allowed) {
+    return NextResponse.json(
+      {
+        error: `Free plan limit reached (${allowance.limit} uploads/month). Upgrade to Pro or Business for unlimited uploads.`,
+      },
+      { status: 403 }
+    );
   }
 
   const formData = await request.formData();

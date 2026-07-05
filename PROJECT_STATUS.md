@@ -8,8 +8,7 @@ out, and exactly what to do next.
 
 Invoice-extraction SaaS: user uploads an invoice (PDF/image) → OCR (Mistral)
 + Gemini extraction → structured data → Excel export. Supabase for
-auth/DB/storage, Prisma as the ORM, Stripe planned for subscriptions
-(not started).
+auth/DB/storage, Prisma as the ORM, Stripe (test mode) for subscriptions.
 
 Both AI providers are on free tiers by design (see gotcha #6) — the
 Anthropic key that was used originally for extraction ran out of credit
@@ -23,8 +22,9 @@ balance, so extraction was switched to Gemini rather than paying for Claude.
 - [x] **Feature 4: Upload flow** — private `uploads` Supabase Storage bucket (10 MB limit, PDF/PNG/JPEG/WEBP only, RLS scoped per-user via `prisma/migrations/20260705080355_add_uploads_storage_bucket`). `app/api/upload/route.ts` validates the file (Zod, `schemas/index.ts`), stores it under `${userId}/${uploadId}.${ext}`, creates an `Upload` row (`status: PENDING`). Dashboard (`app/dashboard/page.tsx`) has a drag-and-drop zone (`components/dashboard/upload-dropzone.tsx`, react-dropzone) and a status list (`components/dashboard/uploads-list.tsx`).
 - [x] **Feature 5: OCR + extraction** — `lib/invoice-processing.ts` (`processUpload`) runs synchronously right after upload: `lib/ocr/index.ts` calls Mistral OCR (`mistral.ocr.process`, PDF via `document_url`/image via `image_url`, joins `pages[].markdown`), then `lib/extraction/index.ts` (`extractInvoiceData`) feeds that text to Gemini (`gemini-2.5-flash` via `lib/gemini.ts`, `generateContent` with `responseMimeType: "application/json"` + `responseJsonSchema` built from `invoiceExtractionSchema` via Zod v4's `z.toJSONSchema()`) to get structured fields, re-validated with `.parse()` before returning. `Upload.status` moves `PENDING` → `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` set on failure), and the result is upserted into `Invoice` keyed on `uploadId`. `app/api/upload/route.ts` triggers this inline on upload; `app/api/extract/route.ts` is a manual retry endpoint for an existing `Upload` (re-downloads from storage). Originally used Claude (`@anthropic-ai/sdk`) — swapped to Gemini after the Anthropic account ran out of credit balance (see gotcha #6) and the user asked for a $0 stack; `lib/anthropic.ts` and the SDK dependency were removed. **Verified live end-to-end**: uploaded a real sample invoice PDF through the actual `/api/upload` flow — Mistral OCR + Gemini extraction correctly pulled vendor name, invoice number, dates, currency, subtotal/tax/total, and all 4 line items with correct quantities/prices.
 - [x] **Feature 6: Excel export + invoices list UI** — `app/api/export/route.ts` streams an `.xlsx` (via `lib/excel.ts`'s `buildInvoiceWorkbook`, `exceljs`) for a given `invoiceId`, scoped to the signed-in user. `lib/invoice-serializer.ts` (`serializeInvoice`) converts a Prisma `Invoice` (+ its `upload.fileName`) into the `InvoiceDetail` shape from `types/index.ts` (Decimal → number, Date → ISO string). `app/dashboard/invoices/page.tsx` lists all of the user's `Invoice` rows; `app/dashboard/invoices/[id]/page.tsx` is the detail view with an export link/button. `app/api/invoices/route.ts` and `app/api/invoices/[id]/route.ts` back these with real Prisma queries (no longer 501 stubs). Verified against both a manually-seeded fake invoice and the real Feature 5 end-to-end result above — list, detail, and `.xlsx` export all confirmed working.
+- [x] **Feature 7: Stripe subscriptions** — Free (5 uploads/month), Pro ($9/mo unlimited), Business ($29/mo unlimited); Pro/Business aren't feature-differentiated yet, only by price. `lib/stripe.ts` is the server-side Stripe client (`STRIPE_SECRET_KEY`). `lib/subscription.ts` has `getUserPlan` (falls back to `FREE` if no `Subscription` row, or if `status` isn't `ACTIVE`/`TRIALING`), `PLAN_UPLOAD_LIMITS`, and `checkUploadAllowance`/`countUploadsThisMonth` (counts `Upload` rows created since the start of the current UTC month). `app/api/upload/route.ts` calls `checkUploadAllowance` and 403s once the free plan's cap is hit. `app/api/stripe/checkout/route.ts` creates (or reuses) a Stripe customer and a Checkout Session (`mode: "subscription"`) for `PRO`/`BUSINESS`, with `userId`+`plan` in session metadata. `app/api/stripe/portal/route.ts` opens a Billing Portal session for the signed-in user's existing customer. `app/api/webhooks/stripe/route.ts` verifies the signature (`STRIPE_WEBHOOK_SECRET`) and handles `checkout.session.completed` (creates the `Subscription` row — this is the only place a row gets *created*, using the guaranteed `userId` from session metadata), `customer.subscription.updated` (updates by `stripeCustomerId`, never creates), and `customer.subscription.deleted` (resets to `FREE`/`CANCELED`). `app/dashboard/billing/page.tsx` shows current plan, usage (`X / 5` or `unlimited`), plan cards, and upgrade/manage buttons (`components/dashboard/billing-actions.tsx`, client components that POST to the checkout/portal routes and redirect to the returned Stripe-hosted URL). Stripe Products/Prices for Pro/Business were created directly via the Stripe API in test mode (see `STRIPE_PRO_PRICE_ID`/`STRIPE_BUSINESS_PRICE_ID` in `.env.local`). **Verified live end-to-end**: real Checkout Session with Stripe's `4242 4242 4242 4242` test card, webhook delivered and processed (confirmed via `stripe listen` log — every event returned `200`), billing page correctly flipped to "Pro" + "unlimited", and the Billing Portal correctly showed the active subscription, card, and invoice history. See gotcha #8 for the local webhook-forwarding setup this depends on.
 
-Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5), `75d059d` (Feature 6). The Gemini swap lands in a follow-up commit — see Current Git Commit.
+Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5), `75d059d` (Feature 6). The Gemini swap and Feature 7 land in follow-up commits — see Current Git Commit.
 
 ## Workflow (read this before touching anything)
 
@@ -39,9 +39,13 @@ No step is committed or pushed without an explicit "it works" from you first.
 
 ## Still Owed / Not Started
 
-- **Stripe subscriptions** (`Subscription` model already exists) — no work started, env vars still commented out in `.env.local`. Last planned feature.
+All planned features are built. Remaining loose ends:
+
+- Pro and Business are priced differently but functionally identical (both unlimited uploads) — no team/seat features exist for Business yet. Fine for v1; revisit if that distinction matters later.
 - The test account (see Test Account below) has one **manually-seeded** `Invoice`/`Upload` pair (`practice-invoice.pdf`, vendor "Northwind Office Supplies Ltd.", `INV-2026-00417`) with no matching Supabase Storage object — it predates the real Gemini test and was only used to exercise Feature 6's UI before Feature 5 was verified live. Superseded by a real upload (`practice-invoice-real.pdf`) with the same content that went through the actual pipeline. Fine to leave, delete, or ignore.
+- The test account is currently subscribed to **Pro** (from live-testing Feature 7's checkout flow) — if you need to test the Free plan's 5-upload/month cap again, cancel it first via the Billing Portal (`/dashboard/billing` → Manage subscription) or the Stripe test-mode dashboard.
 - Watch for: Mistral OCR response shape assumptions in `lib/ocr/index.ts` (only `pages[].markdown` is used — table/image blocks are ignored), and Gemini's free-tier rate limits if extraction volume grows (see gotcha #6).
+- No production Stripe webhook endpoint is configured yet (only local `stripe listen` forwarding, see gotcha #8) — needed before this could go live for real users.
 
 ## Known Gotchas (read before you burn time rediscovering these)
 
@@ -112,6 +116,31 @@ UI, check for this before assuming the endpoint is broken: compare
 `supabase.auth.getUser().id` against the row's `userId`, and check
 `prisma.user.findMany({ where: { email } })` for duplicates.
 
+**8. Stripe webhooks need `stripe listen` running locally, and it doesn't
+survive a reboot.** `app/api/webhooks/stripe/route.ts` verifies signatures
+against `STRIPE_WEBHOOK_SECRET`, which is only valid for the `stripe listen`
+session that generated it — restarting `stripe listen` rotates it (unless
+you pass `--print-secret` first to get a stable one, or use a saved webhook
+endpoint from the Stripe dashboard instead). To test checkout/subscription
+changes locally:
+```
+stripe listen --forward-to localhost:3000/api/webhooks/stripe
+```
+Never pass the API key as a literal `--api-key` command-line argument — it
+ends up in shell history/process args. Export `STRIPE_API_KEY` first instead
+(the CLI reads it automatically):
+```
+export STRIPE_API_KEY=$(grep '^STRIPE_SECRET_KEY=' .env.local | cut -d= -f2-)
+```
+Stripe CLI was installed via `winget install --id Stripe.StripeCli -e --source winget`
+(had to pass `--source winget` explicitly — see gotcha #1, `winget`'s
+`msstore` source fails on this network's TLS interception even though
+`winget` itself isn't a Node process). The installed binary may not be on
+`PATH` in an already-open shell after install; the full path was
+`$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Stripe.StripeCli_Microsoft.Winget.Source_8wekyb3d8bbwe\stripe.exe`
+— your suffix hash will differ. After changing `STRIPE_WEBHOOK_SECRET` (or
+any other env var), restart the `next dev` server too (gotcha #5).
+
 ## Test Account
 
 For manual testing without burning more real signups:
@@ -120,6 +149,7 @@ For manual testing without burning more real signups:
 - Already confirmed (via Admin API). Has several test `Upload`/`Invoice`
   rows from manual testing (some fake/seeded, some real — see Still Owed
   and gotcha #7). Harmless, safe to ignore or clean up.
+- Currently subscribed to **Pro** in Stripe test mode (see Still Owed).
 
 ## Tech Stack Notes
 
@@ -130,6 +160,7 @@ For manual testing without burning more real signups:
 - **React 19**
 - **Supabase Auth** — email/password via `@supabase/ssr`. See gotchas #3–#4.
 - **Gemini (`@google/genai`)** for invoice extraction, **Mistral OCR** for OCR — both free-tier, no Claude/Anthropic dependency anymore. See gotcha #6.
+- **Stripe** (test mode) for subscriptions — `stripe` npm package, Checkout + Billing Portal (hosted, no `@stripe/stripe-js` needed client-side). See gotcha #8 for local webhook testing.
 - Dev server convention this session: run `npm run dev` in the background, log to the scratchpad dir, curl-poll `http://localhost:3000/` until it responds before driving it with the browser.
 
 ## Current Git Commit
