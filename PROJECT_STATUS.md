@@ -6,10 +6,14 @@ out, and exactly what to do next.
 
 ## What Extractly is
 
-Invoice-extraction SaaS: user uploads an invoice (PDF/image) → OCR (Mistral
-primary) + Claude extraction → structured data → Excel export. Supabase for
+Invoice-extraction SaaS: user uploads an invoice (PDF/image) → OCR (Mistral)
++ Gemini extraction → structured data → Excel export. Supabase for
 auth/DB/storage, Prisma as the ORM, Stripe planned for subscriptions
 (not started).
+
+Both AI providers are on free tiers by design (see gotcha #6) — the
+Anthropic key that was used originally for extraction ran out of credit
+balance, so extraction was switched to Gemini rather than paying for Claude.
 
 ## Completed Features
 
@@ -17,10 +21,10 @@ auth/DB/storage, Prisma as the ORM, Stripe planned for subscriptions
 - [x] **Feature 2: Database & Prisma** — `User`/`Upload`/`Invoice`/`Subscription` schema, migrated against Supabase Postgres (transaction pooler for the app, session pooler for migrations — see `prisma.config.ts`), plus a Postgres trigger (`prisma/migrations/20260704150252_add_user_sync_trigger`) that mirrors new Supabase Auth users into `public.users`.
 - [x] **Feature 3: Auth guard** — `proxy.ts` + `lib/supabase/middleware.ts` refresh the Supabase session, redirect unauthenticated users away from `/dashboard`, redirect authenticated users away from `/login` + `/register`, and exchange the `?code=` param from Supabase email links (confirmation/magic-link) for a session. Real login/register forms (`components/auth/`) wired to Supabase Auth; dashboard header shows the signed-in user + sign-out (`components/dashboard/sign-out-button.tsx`).
 - [x] **Feature 4: Upload flow** — private `uploads` Supabase Storage bucket (10 MB limit, PDF/PNG/JPEG/WEBP only, RLS scoped per-user via `prisma/migrations/20260705080355_add_uploads_storage_bucket`). `app/api/upload/route.ts` validates the file (Zod, `schemas/index.ts`), stores it under `${userId}/${uploadId}.${ext}`, creates an `Upload` row (`status: PENDING`). Dashboard (`app/dashboard/page.tsx`) has a drag-and-drop zone (`components/dashboard/upload-dropzone.tsx`, react-dropzone) and a status list (`components/dashboard/uploads-list.tsx`).
-- [x] **Feature 5: OCR + extraction** — `lib/invoice-processing.ts` (`processUpload`) runs synchronously right after upload: `lib/ocr/index.ts` calls Mistral OCR (`mistral.ocr.process`, PDF via `document_url`/image via `image_url`, joins `pages[].markdown`), then `lib/extraction/index.ts` (`extractInvoiceData`) feeds that text to Claude (`claude-opus-4-8` via `messages.parse` + `zodOutputFormat(invoiceExtractionSchema)` from `schemas/index.ts`) to get structured fields. `Upload.status` moves `PENDING` → `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` set on failure), and the result is upserted into `Invoice` keyed on `uploadId`. `app/api/upload/route.ts` triggers this inline on upload; `app/api/extract/route.ts` is a manual retry endpoint for an existing `Upload` (re-downloads from storage). Verified via `tsc --noEmit` against the real Mistral/Anthropic SDK types. One real attempt was made (`test-invoice.pdf`) and it reached the Claude API call but failed with `"Your credit balance is too low to access the Anthropic API"` — the Anthropic account backing this project has no credits, so the pipeline itself is still unverified end-to-end. See Still Owed.
-- [x] **Feature 6: Excel export + invoices list UI** — `app/api/export/route.ts` streams an `.xlsx` (via `lib/excel.ts`'s `buildInvoiceWorkbook`, `exceljs`) for a given `invoiceId`, scoped to the signed-in user. `lib/invoice-serializer.ts` (`serializeInvoice`) converts a Prisma `Invoice` (+ its `upload.fileName`) into the `InvoiceDetail` shape from `types/index.ts` (Decimal → number, Date → ISO string). `app/dashboard/invoices/page.tsx` lists all of the user's `Invoice` rows; `app/dashboard/invoices/[id]/page.tsx` is the detail view with an export link/button. `app/api/invoices/route.ts` and `app/api/invoices/[id]/route.ts` back these with real Prisma queries (no longer 501 stubs). Tested manually: since the Anthropic account has no credits, a fake `Upload`+`Invoice` pair was inserted directly into the DB (via a temporary dev-only API route, deleted after use — not via real OCR/extraction) to exercise the list/detail/export UI. User confirmed it all works.
+- [x] **Feature 5: OCR + extraction** — `lib/invoice-processing.ts` (`processUpload`) runs synchronously right after upload: `lib/ocr/index.ts` calls Mistral OCR (`mistral.ocr.process`, PDF via `document_url`/image via `image_url`, joins `pages[].markdown`), then `lib/extraction/index.ts` (`extractInvoiceData`) feeds that text to Gemini (`gemini-2.5-flash` via `lib/gemini.ts`, `generateContent` with `responseMimeType: "application/json"` + `responseJsonSchema` built from `invoiceExtractionSchema` via Zod v4's `z.toJSONSchema()`) to get structured fields, re-validated with `.parse()` before returning. `Upload.status` moves `PENDING` → `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` set on failure), and the result is upserted into `Invoice` keyed on `uploadId`. `app/api/upload/route.ts` triggers this inline on upload; `app/api/extract/route.ts` is a manual retry endpoint for an existing `Upload` (re-downloads from storage). Originally used Claude (`@anthropic-ai/sdk`) — swapped to Gemini after the Anthropic account ran out of credit balance (see gotcha #6) and the user asked for a $0 stack; `lib/anthropic.ts` and the SDK dependency were removed. **Verified live end-to-end**: uploaded a real sample invoice PDF through the actual `/api/upload` flow — Mistral OCR + Gemini extraction correctly pulled vendor name, invoice number, dates, currency, subtotal/tax/total, and all 4 line items with correct quantities/prices.
+- [x] **Feature 6: Excel export + invoices list UI** — `app/api/export/route.ts` streams an `.xlsx` (via `lib/excel.ts`'s `buildInvoiceWorkbook`, `exceljs`) for a given `invoiceId`, scoped to the signed-in user. `lib/invoice-serializer.ts` (`serializeInvoice`) converts a Prisma `Invoice` (+ its `upload.fileName`) into the `InvoiceDetail` shape from `types/index.ts` (Decimal → number, Date → ISO string). `app/dashboard/invoices/page.tsx` lists all of the user's `Invoice` rows; `app/dashboard/invoices/[id]/page.tsx` is the detail view with an export link/button. `app/api/invoices/route.ts` and `app/api/invoices/[id]/route.ts` back these with real Prisma queries (no longer 501 stubs). Verified against both a manually-seeded fake invoice and the real Feature 5 end-to-end result above — list, detail, and `.xlsx` export all confirmed working.
 
-Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5), `75d059d` (Feature 6).
+Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5), `75d059d` (Feature 6). The Gemini swap lands in a follow-up commit — see Current Git Commit.
 
 ## Workflow (read this before touching anything)
 
@@ -35,9 +39,9 @@ No step is committed or pushed without an explicit "it works" from you first.
 
 ## Still Owed / Not Started
 
-- **Live end-to-end test of Feature 5's OCR/extraction pipeline** — still not exercised with a real API call. The Anthropic API key on this project currently has **no credit balance** — a real upload attempt (`test-invoice.pdf`) reached the Claude call and failed with `"Your credit balance is too low to access the Anthropic API"`. Needs credits added to the Anthropic account before this can be verified. Watch for: Mistral OCR response shape assumptions in `lib/ocr/index.ts` (only `pages[].markdown` is used — table/image blocks are ignored), and whether `claude-opus-4-8` structured output reliably returns `parsed_output` (code currently throws if it's null).
 - **Stripe subscriptions** (`Subscription` model already exists) — no work started, env vars still commented out in `.env.local`. Last planned feature.
-- The test account (see Test Account below) has one **manually-seeded** `Invoice`/`Upload` pair (vendor "Northwind Office Supplies Ltd.", `INV-2026-00417`) used to test Feature 6's UI without spending API credits — it did not come from real OCR/extraction. Fine to leave, delete, or ignore.
+- The test account (see Test Account below) has one **manually-seeded** `Invoice`/`Upload` pair (`practice-invoice.pdf`, vendor "Northwind Office Supplies Ltd.", `INV-2026-00417`) with no matching Supabase Storage object — it predates the real Gemini test and was only used to exercise Feature 6's UI before Feature 5 was verified live. Superseded by a real upload (`practice-invoice-real.pdf`) with the same content that went through the actual pipeline. Fine to leave, delete, or ignore.
+- Watch for: Mistral OCR response shape assumptions in `lib/ocr/index.ts` (only `pages[].markdown` is used — table/image blocks are ignored), and Gemini's free-tier rate limits if extraction volume grows (see gotcha #6).
 
 ## Known Gotchas (read before you burn time rediscovering these)
 
@@ -86,13 +90,36 @@ Those are inlined at build/start time. If you add/change anything in
 `.env.local`, kill and restart the dev server — hot reload does not pick up
 new env vars.
 
+**6. Extraction uses Gemini, not Claude — by design, to stay at $0.**
+`GEMINI_API_KEY` (from Google AI Studio) is required in `.env.local`.
+`lib/extraction/index.ts` calls `gemini-2.5-flash` via `lib/gemini.ts`.
+`ANTHROPIC_API_KEY`/`@anthropic-ai/sdk`/`lib/anthropic.ts` are gone — don't
+reintroduce Claude for extraction without checking with the user first, they
+explicitly want no paid API usage. Mistral OCR stays as-is (already free
+tier). If Gemini's free-tier rate limit ever becomes a blocker, that's a
+user decision, not something to silently work around by switching providers
+or paying.
+
+**7. Two Supabase auth users can exist for the test account's email at
+once, with old data orphaned under a stale user id.** Discovered when
+`/api/extract` 404'd on an upload that clearly belonged to the logged-in
+test account: there were two `Upload` rows both named `test-invoice.pdf`,
+one under the *current* session's `user.id` and one under a different id
+with no matching row in `public.users` at all (likely left over from an
+earlier account recreation/confirmation cycle — see gotchas #3–#4). If a
+query scoped to `user.id` unexpectedly misses a record you can see in the
+UI, check for this before assuming the endpoint is broken: compare
+`supabase.auth.getUser().id` against the row's `userId`, and check
+`prisma.user.findMany({ where: { email } })` for duplicates.
+
 ## Test Account
 
 For manual testing without burning more real signups:
 - Email: `stanleysullivan316+extractly-test2@gmail.com`
 - Password: `TestPassword123!`
-- Already confirmed (via Admin API) and has one test `Upload` row
-  ("test-invoice.pdf", status PENDING) — harmless, safe to ignore or delete.
+- Already confirmed (via Admin API). Has several test `Upload`/`Invoice`
+  rows from manual testing (some fake/seeded, some real — see Still Owed
+  and gotcha #7). Harmless, safe to ignore or clean up.
 
 ## Tech Stack Notes
 
@@ -102,6 +129,7 @@ For manual testing without burning more real signups:
 - **Prisma 7** (config in `prisma.config.ts`, not in `schema.prisma` — `url`/`directUrl` datasource fields were removed from the schema file in Prisma 7). See gotcha #2 for migrations.
 - **React 19**
 - **Supabase Auth** — email/password via `@supabase/ssr`. See gotchas #3–#4.
+- **Gemini (`@google/genai`)** for invoice extraction, **Mistral OCR** for OCR — both free-tier, no Claude/Anthropic dependency anymore. See gotcha #6.
 - Dev server convention this session: run `npm run dev` in the background, log to the scratchpad dir, curl-poll `http://localhost:3000/` until it responds before driving it with the browser.
 
 ## Current Git Commit
