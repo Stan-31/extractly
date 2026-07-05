@@ -17,18 +17,16 @@ auth/DB/storage, Prisma as the ORM, Stripe planned for subscriptions
 - [x] **Feature 2: Database & Prisma** — `User`/`Upload`/`Invoice`/`Subscription` schema, migrated against Supabase Postgres (transaction pooler for the app, session pooler for migrations — see `prisma.config.ts`), plus a Postgres trigger (`prisma/migrations/20260704150252_add_user_sync_trigger`) that mirrors new Supabase Auth users into `public.users`.
 - [x] **Feature 3: Auth guard** — `proxy.ts` + `lib/supabase/middleware.ts` refresh the Supabase session, redirect unauthenticated users away from `/dashboard`, redirect authenticated users away from `/login` + `/register`, and exchange the `?code=` param from Supabase email links (confirmation/magic-link) for a session. Real login/register forms (`components/auth/`) wired to Supabase Auth; dashboard header shows the signed-in user + sign-out (`components/dashboard/sign-out-button.tsx`).
 - [x] **Feature 4: Upload flow** — private `uploads` Supabase Storage bucket (10 MB limit, PDF/PNG/JPEG/WEBP only, RLS scoped per-user via `prisma/migrations/20260705080355_add_uploads_storage_bucket`). `app/api/upload/route.ts` validates the file (Zod, `schemas/index.ts`), stores it under `${userId}/${uploadId}.${ext}`, creates an `Upload` row (`status: PENDING`). Dashboard (`app/dashboard/page.tsx`) has a drag-and-drop zone (`components/dashboard/upload-dropzone.tsx`, react-dropzone) and a status list (`components/dashboard/uploads-list.tsx`).
+- [x] **Feature 5: OCR + extraction** — `lib/invoice-processing.ts` (`processUpload`) runs synchronously right after upload: `lib/ocr/index.ts` calls Mistral OCR (`mistral.ocr.process`, PDF via `document_url`/image via `image_url`, joins `pages[].markdown`), then `lib/extraction/index.ts` (`extractInvoiceData`) feeds that text to Claude (`claude-opus-4-8` via `messages.parse` + `zodOutputFormat(invoiceExtractionSchema)` from `schemas/index.ts`) to get structured fields. `Upload.status` moves `PENDING` → `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` set on failure), and the result is upserted into `Invoice` keyed on `uploadId`. `app/api/upload/route.ts` triggers this inline on upload; `app/api/extract/route.ts` is a manual retry endpoint for an existing `Upload` (re-downloads from storage). Verified via `tsc --noEmit` against the real Mistral/Anthropic SDK types — not yet exercised with a live API call end-to-end (user opted to skip that to avoid burning real API usage this session).
 
-Both committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4).
+Committed to `main`: `80375f3` (Features 2–3), `37ab075` (Feature 4), `9539a47` (Feature 5).
 
-## Next Milestone — Feature 5: OCR + extraction
+## Next Milestone — Feature 6: Excel export + invoices list UI
 
-Uploads currently sit at `PENDING` forever. Next step:
-1. Wire `lib/ocr/index.ts` (stub says "Mistral primary, Google Vision fallback") to actually call Mistral OCR on a `PENDING` upload's storage file.
-2. Move the `Upload.status` to `PROCESSING` → `COMPLETED`/`FAILED` (`errorMessage` on failure — the UI already renders this).
-3. Feed the OCR text to Claude (`lib/anthropic.ts` already has the client) to extract structured fields and create the matching `Invoice` row (schema already has `vendorName`, `invoiceNumber`, `invoiceDate`, `dueDate`, `currency`, `subtotal`, `taxAmount`, `totalAmount`, `lineItems` JSON, `rawExtraction` JSON).
-4. Decide/implement the trigger: a route handler called right after upload succeeds (simplest, synchronous) vs. a background job/queue (better UX for slow OCR, more infra). Given no queue infra exists yet, start synchronous inside `app/api/upload/route.ts` or a follow-up `app/api/extract/route.ts` (already stubbed, currently 501) and revisit if it's too slow.
-5. After that: `app/api/export/route.ts` (Excel export via `lib/excel.ts`, `exceljs` already a dependency) and `app/dashboard/invoices` (list/detail UI) are the logical Feature 6+.
-6. Stripe subscriptions (`Subscription` model already exists) are last — no work started, env vars still commented out in `.env.local`.
+1. `app/api/export/route.ts` — Excel export via `lib/excel.ts` (`exceljs` already a dependency) for a completed `Upload`'s `Invoice` row.
+2. `app/dashboard/invoices` — currently a "Coming soon." stub (`app/dashboard/invoices/page.tsx`) and a 501-stub API (`app/api/invoices/route.ts`, `app/api/invoices/[id]/route.ts`). Build the real list/detail UI reading `Invoice` rows for the signed-in user.
+3. **First real test still owed**: no upload has gone through the live OCR/extraction pipeline yet this session — do that first when resuming, using a real or synthetic invoice PDF, before building more on top of it. Watch for: Mistral OCR response shape assumptions in `lib/ocr/index.ts` (only `pages[].markdown` is used — table/image blocks are ignored), and whether `claude-opus-4-8` structured output reliably returns `parsed_output` (code currently throws if it's null).
+4. Stripe subscriptions (`Subscription` model already exists) are last — no work started, env vars still commented out in `.env.local`.
 
 ## Known Gotchas (read before you burn time rediscovering these)
 
@@ -97,6 +95,6 @@ For manual testing without burning more real signups:
 
 ## Current Git Commit
 
-- **Hash:** `37ab075`
+- **Hash:** `9539a47`
 - **Branch:** `main`
 - **Repo:** https://github.com/Stan-31/extractly
